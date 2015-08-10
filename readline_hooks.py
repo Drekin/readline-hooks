@@ -4,8 +4,9 @@ from __future__ import print_function # PY2
 import sys
 import traceback
 import platform
-from ctypes import (pythonapi, cdll, cast, 
-	c_int, c_char_p, c_void_p, c_size_t, CFUNCTYPE)
+import ctypes.util
+from ctypes import (POINTER, CFUNCTYPE, CDLL, pythonapi, cast, addressof, 
+	c_int, c_char_p, c_void_p, c_size_t, py_object)
 
 
 WINDOWS = platform.system().lower() == "windows"
@@ -13,26 +14,73 @@ WINDOWS = platform.system().lower() == "windows"
 
 def get_libc():
 	if WINDOWS:
-		return cdll.msvcrt
+		path = "msvcrt"
 	else:
-		return cdll["libc.so.6"]
+		path = ctypes.util.find_library("c")
+		if path is None:
+			raise RuntimeError("cannot locate libc")
+	
+	return CDLL(path)
+
+
+def get_file_pointers_Python2():
+	PyFile_AsFile = pythonapi.PyFile_AsFile
+	PyFile_AsFile.restype = c_void_p
+	PyFile_AsFile.argtypes = [py_object]
+	
+	stdin = PyFile_AsFile(sys.stdin)
+	stdout = PyFile_AsFile(sys.stdout)
+	return stdin, stdout
+
+def get_file_pointers_Unix():
+	runtime = CDLL(None)
+	stdin = c_void_p.in_dll(runtime, "stdin").value
+	stdout = c_void_p.in_dll(runtime, "stdout").value
+	return stdin, stdout
+
+def get_file_pointers_msvcrt():
+	class FILE(ctypes.Structure):
+		_fields_ = [
+			("_ptr", c_char_p), 
+			("_cnt", c_int), 
+			("_base", c_char_p), 
+			("_flag", c_int), 
+			("_file", c_int), 
+			("_charbuf", c_int), 
+			("_bufsize", c_int), 
+			("_tmpfname", c_char_p), 
+		]
+	
+	msvcrt = CDLL(ctypes.util.find_msvcrt())
+	iob_func = msvcrt.__iob_func
+	iob_func.restype = POINTER(FILE)
+	iob_func.argtypes = []
+	
+	array = iob_func()
+	stdin = addressof(array[0])
+	stdout = addressof(array[1])
+	return stdin, stdout
+
+def get_file_pointers_ucrtbase():
+	ucrtbase = CDLL("ucrtbase")
+	iob_func = ucrtbase.__acrt_iob_func
+	iob_func.restype = c_void_p
+	iob_func.argtypes = [c_int]
+	
+	stdin = iob_func(0)
+	stdout = iob_func(1)
+	return stdin, stdout
 
 def get_file_pointers():
-	if WINDOWS:
-		iob_func = cdll.ucrtbase.__acrt_iob_func
-		iob_func.restype = c_void_p
-		iob_func.argtypes = [c_int]
-		
-		stdin = iob_func(0)
-		stdout = iob_func(1)
-		
+	if sys.version_info < (3,):
+		return get_file_pointers_Python2()
+	elif WINDOWS:
+		if sys.version_info >= (3, 5):
+			return get_file_pointers_ucrtbase()
+		else:
+			return get_file_pointers_msvcrt()
 	else:
-		runtime = cdll[None]
-		
-		stdin = c_void_p.in_dll(runtime, "stdin").value
-		stdout = c_void_p.in_dll(runtime, "stdout").value
-	
-	return stdin, stdout
+		return get_file_pointers_Unix()
 
 
 HOOKFUNC = CFUNCTYPE(c_char_p, c_void_p, c_void_p, c_char_p)
@@ -88,8 +136,6 @@ def get_readline_hook():
 	elif actual_address is None:
 		return None
 	
-	print(actual_address)
-	
 	readline_bytes = HOOKFUNC(actual_address)
 	
 	def readline(prompt=""):
@@ -123,5 +169,5 @@ def stdio_readline(prompt=""):
 	return sys.stdin.readline()
 
 
-sys.__readlinehook__ = get_readline_hook()
+#sys.__readlinehook__ = get_readline_hook()
 
